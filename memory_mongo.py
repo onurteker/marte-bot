@@ -293,7 +293,7 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
         else:
             if not any(s["id"] == inst_id for s in self.sys_instructions):
                 self.sys_instructions.append(entry)
-                self._save_json(self._sys_path, self.sys_instructions)
+                self._save_json(self._sys_path, self.sys_instruct)ons)
         return inst_id
 
     def get_system_instructions(self) -> list:
@@ -320,6 +320,63 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
                 self._save_json(self._sys_path, self.sys_instructions)
                 return True
             return False
+
+    def auto_update_behavior(self, groq_client) -> list:
+        """Konusma gecmisinden davranis tercihlerini cikar, sistem talimatlarini guncelle"""
+        # Son 20 mesaji al
+        if self.use_mongo:
+            recent = list(self.msg_col.find().sort("timestamp", -1).limit(20))
+            recent.reverse()
+        else:
+            recent = self.messages[-20:]
+
+        if len(recent) < 6:
+            return []
+
+        msgs_text = ""
+        for m in recent:
+            role = m.get("role", "")
+            text = m.get("text", "")[:300]
+            msgs_text += f"[{role}]: {text}\n"
+
+        existing = self.get_system_instructions()
+        existing_str = "\n".join(f"- {e}" for e in existing) if existing else "Henuz yok"
+
+        prompt = f"""Asagidaki konusma gecmisini analiz et. Kullanicinin tercihlerini cikar.
+Bak:
+- Cevap uzunlugu (kisa mi uzun mu istedi, sikayeti var mi?)
+- Ton (resmi mi samimi mi?)
+- Tekrar eden konular veya odak alanlari
+- Begenmemesini ima ettigi seyler
+
+Mevcut aktif sistem talimatlari (bunlari tekrarlama):
+{existing_str}
+
+Konusma gecmisi:
+{msgs_text}
+
+SADECE yeni ve farkli, somut talimatlar yaz. Her biri bir satir.
+Belirsiz veya genel seyler yazma. Max 2 talimat.
+Yeni bir sey yoksa sadece "YOK" yaz."""
+
+        try:
+            resp = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.1,
+            )
+            result = resp.choices[0].message.content.strip()
+            if result.upper().startswith("YOK") or not result:
+                return []
+            new_instructions = []
+            for line in result.split("\n"):
+                line = line.strip().lstrip("-*•0123456789.").strip()
+                if line and len(line) > 10 and "YOK" not in line.upper():
+                    new_instructions.append(line)
+            return new_instructions
+        except Exception:
+            return []
 
     # ── İstatistikler ─────────────────────────────────────────────────────────
 
