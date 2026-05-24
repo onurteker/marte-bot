@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Marte - Kişisel AI Asistan (Telegram Bot)
-Groq (Llama 3.3 70B) + Gemini Embeddings + Kalıcı Semantik Hafıza
+Marte - Kisisel AI Asistan (Telegram Bot)
+Groq (Llama 3.3 70B) + Gemini Embeddings + Kalici Semantik Hafiza
++ Otomatik kullanici profili + Web arama + PDF destegi
 """
 
 import os
@@ -23,6 +24,7 @@ from groq import Groq
 import google.generativeai as genai
 
 from memory import MarteMemory
+from web_search import web_search
 from render_keep_alive import start_ping_server
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -39,15 +41,24 @@ GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Gemini sadece embeddings için
 genai.configure(api_key=GEMINI_API_KEY)
-
-# Kalıcı hafıza sistemi (embeddings için Gemini kullanır)
 memory = MarteMemory(GEMINI_API_KEY)
 
 CHAT_MODEL   = "llama-3.3-70b-versatile"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
+
+
+def build_system_prompt() -> str:
+    base = (
+        "Sen Marte, Turkce konusan kisisel bir AI asistansin. "
+        "Samimi, zeki ve yardimseversn. "
+        "Kullanicinin kisisel asistanisin; onun projelerini, tercihlerini ve uzmanlik alanini biliyorsun.\n"
+    )
+    profile = memory.get_user_profile_text()
+    if profile:
+        base += f"\n{profile}\n"
+    return base
+
 
 def groq_chat(prompt: str, system: str = None) -> str:
     messages = []
@@ -60,6 +71,7 @@ def groq_chat(prompt: str, system: str = None) -> str:
         max_tokens=2048,
     )
     return resp.choices[0].message.content
+
 
 def groq_vision(image_b64: str, prompt: str) -> str:
     resp = groq_client.chat.completions.create(
@@ -75,31 +87,39 @@ def groq_vision(image_b64: str, prompt: str) -> str:
     )
     return resp.choices[0].message.content
 
+
 # ── Komutlar ──────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (
-        f"Merhaba {user.first_name}! Ben Marte, senin kişisel AI asistanım.\n\n"
-        "Bana her şeyi sorabilirsin. Resim dosyaları da gönderebilirsin.\n\n"
+        f"Merhaba {user.first_name}! Ben Marte, senin kisisel AI asistaninim.\n\n"
+        "Bana her seyi sorabilirsin. Resim, PDF, TXT dosyalari da gonderebilirsin.\n\n"
         "Komutlar:\n"
-        "/yardim - Yardım menüsü\n"
-        "/hafiza - Hafıza istatistikleri\n"
-        "/hatirlat <sorgu> - Geçmişte arama yap"
+        "/yardim - Yardim menusu\n"
+        "/hafiza - Hafiza istatistikleri\n"
+        "/profil - Hakkimda bildiklerimi goster\n"
+        "/ogret <bilgi> - Bana bir sey ogret\n"
+        "/ara <sorgu> - Web'de ara\n"
+        "/hatirlat <sorgu> - Gecmiste arama yap"
     )
     await update.message.reply_text(text)
 
 
 async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "Marte Komutları:\n\n"
-        "/start - Başlangıç mesajı\n"
-        "/yardim - Bu menü\n"
-        "/hafiza - Hafıza istatistikleri\n"
-        "/hatirlat <sorgu> - Geçmiş konuşmalarda ara\n\n"
-        "Desteklenen dosya türleri:\n"
-        "• JPG, PNG, WEBP (görsel analizi)\n"
-        "• TXT (metin çıkarımı)\n\n"
-        "Her konuşmayı hafızama kaydediyorum."
+        "Marte Komutlari:\n\n"
+        "/start - Baslangic mesaji\n"
+        "/yardim - Bu menu\n"
+        "/hafiza - Hafiza istatistikleri\n"
+        "/profil - Hakkimda bildiklerimi goster\n"
+        "/ogret <bilgi> - Bana kalici bir bilgi ogret\n"
+        "/ara <sorgu> - Web'de arama yap\n"
+        "/hatirlat <sorgu> - Gecmis konusmalarda ara\n\n"
+        "Desteklenen dosya turleri:\n"
+        "* JPG, PNG, WEBP (gorsel analizi)\n"
+        "* PDF (metin cikarimi)\n"
+        "* TXT (metin analizi)\n\n"
+        "Her konusmani hafizama kaydediyorum ve seni zamanla daha iyi taniyorum."
     )
     await update.message.reply_text(text)
 
@@ -107,26 +127,71 @@ async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def hafiza(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = memory.stats()
     text = (
-        f"Hafıza İstatistikleri:\n\n"
+        f"Hafiza Istatistikleri:\n\n"
         f"Mesajlar: {stats['messages']}\n"
         f"Belgeler: {stats['documents']}\n"
-        f"Kullanıcı notları: {stats['user_facts']}"
+        f"Hakkinda bildigim bilgiler: {stats['user_facts']}"
     )
     await update.message.reply_text(text)
 
 
-async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not memory.user_facts:
+        await update.message.reply_text(
+            "Henuz hakkinda kaydedilmis bilgi yok.\n"
+            "/ogret komutuyla bana bilgi ogretebilirsin."
+        )
+        return
+    facts = [f["fact"] for f in memory.user_facts]
+    text = f"Hakkinda bildiklerim ({len(facts)} bilgi):\n\n"
+    for i, fact in enumerate(facts, 1):
+        text += f"{i}. {fact}\n"
+    await update.message.reply_text(text[:4000])
+
+
+async def ogret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Kullanım: /hatirlat <arama terimi>")
+        await update.message.reply_text(
+            "Kullanim: /ogret <ogretmek istedigin bilgi>\n"
+            "Ornek: /ogret Ben fizik arastirmacisiyim"
+        )
+        return
+    fact = " ".join(context.args)
+    memory.add_user_fact(fact)
+    await update.message.reply_text(f"Kaydettim! \"{fact}\" - Artik bunu hep bilecegim.")
+
+
+async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Kullanim: /ara <arama terimi>")
         return
     sorgu = " ".join(context.args)
-    await update.message.reply_text(f"'{sorgu}' için hafızamda arıyorum...")
+    await update.message.reply_text(f"'{sorgu}' icin web'de ariyorum...")
+    try:
+        results = web_search(sorgu, max_results=4)
+        summary_prompt = (
+            f"Asagidaki web arama sonuclarini Turkce olarak ozet ve kullanicinin sorusunu cevapla:\n\n"
+            f"{results}\n\n"
+            f"Kullanici sorusu: {sorgu}"
+        )
+        summary = groq_chat(summary_prompt, system=build_system_prompt())
+        await update.message.reply_text(summary[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"Arama hatasi: {str(e)[:200]}")
+
+
+async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Kullanim: /hatirlat <arama terimi>")
+        return
+    sorgu = " ".join(context.args)
+    await update.message.reply_text(f"'{sorgu}' icin hafizamda ariyorum...")
     try:
         results = memory.search(sorgu, n=5)
         if not results:
-            await update.message.reply_text("İlgili bir şey bulamadım.")
+            await update.message.reply_text("Ilgili bir sey bulamadim.")
             return
-        lines = [f"En yakın {len(results)} sonuç:\n"]
+        lines = [f"En yakin {len(results)} sonuc:\n"]
         for score, entry in results:
             ts = entry.get("timestamp", "")[:10]
             if entry["type"] == "message":
@@ -139,23 +204,19 @@ async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         await update.message.reply_text("\n\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"Arama hatası: {str(e)[:200]}")
+        await update.message.reply_text(f"Arama hatasi: {str(e)[:200]}")
 
 
-# ── Mesaj işleyici ─────────────────────────────────────────────────────────────
+# ── Mesaj isleyici ─────────────────────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.effective_user
 
     ctx = memory.get_context(text)
-
-    system_prompt = (
-        "Sen Marte, Türkçe konuşan kişisel bir AI asistansın. "
-        "Samimi, zeki ve yardımseversin."
-    )
+    system_prompt = build_system_prompt()
 
     if ctx:
-        prompt = f"{ctx}\n\nŞu anki kullanıcı mesajı: {text}"
+        prompt = f"{ctx}\n\nSu anki kullanici mesaji: {text}"
     else:
         prompt = text
 
@@ -165,6 +226,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         memory.add_message("user", text, user_id=user.id)
         memory.add_message("model", response_text)
 
+        # Otomatik kullanici profili cikarimi
+        try:
+            new_facts = memory.auto_extract_facts(text, groq_client)
+            for fact in new_facts:
+                memory.add_user_fact(fact)
+                logger.info(f"Yeni kullanici bilgisi: {fact}")
+        except Exception:
+            pass
+
         for i in range(0, len(response_text), 4000):
             await update.message.reply_text(response_text[i : i + 4000])
 
@@ -172,12 +242,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
 
-# ── Doküman işleyici ───────────────────────────────────────────────────────────
+# ── Dokuman isleyici ───────────────────────────────────────────────────────────
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     fname = doc.file_name or "dosya"
     mime = doc.mime_type or "application/octet-stream"
-    caption = update.message.caption or "Bu dosyayı detaylıca analiz et ve özetle."
+    caption = update.message.caption or "Bu dosyayi detaylica analiz et ve ozetle."
 
     await update.message.reply_text(f"Analiz ediyorum: {fname}...")
 
@@ -187,15 +257,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if mime in ("text/plain",) or fname.endswith(".txt"):
             file_text = fb.decode("utf-8", errors="ignore")[:8000]
-            prompt = f"{caption}\n\nDosya içeriği:\n{file_text}"
+            prompt = f"{caption}\n\nDosya icerigi:\n{file_text}"
+
+        elif mime == "application/pdf" or fname.lower().endswith(".pdf"):
+            try:
+                import io
+                from PyPDF2 import PdfReader
+                reader = PdfReader(io.BytesIO(bytes(fb)))
+                pages_text = []
+                for page in reader.pages[:20]:
+                    pages_text.append(page.extract_text() or "")
+                file_text = "\n".join(pages_text)[:8000]
+                if file_text.strip():
+                    prompt = f"{caption}\n\nPDF icerigi ({len(reader.pages)} sayfa):\n{file_text}"
+                else:
+                    prompt = f"{caption}\n\nPDF: {fname} - Metin cikarildi ancak icerik bos (taranmis gorsel PDF olabilir)"
+            except Exception as pe:
+                prompt = f"{caption}\n\nPDF: {fname} ({len(fb)} bytes) - Okuma hatasi: {str(pe)[:100]}"
+
         else:
             file_text = f"[{fname} - {len(fb)} bytes, {mime}]"
-            prompt = f"{caption}\n\nDosya: {file_text}\n(Not: Bu dosya türü için metin çıkarımı desteklenmiyor)"
+            prompt = f"{caption}\n\nDosya: {file_text}\n(Bu dosya turu icin metin cikarimi desteklenmiyor)"
 
-        result_text = groq_chat(prompt)
+        result_text = groq_chat(prompt, system=build_system_prompt())
 
         memory.add_document(fname, result_text[:1500], mime_type=mime)
-        memory.add_message("user", f"[Dosya yüklendi: {fname}] {caption}")
+        memory.add_message("user", f"[Dosya yuklendi: {fname}] {caption}")
         memory.add_message("model", result_text[:500])
 
         for i in range(0, len(result_text), 4000):
@@ -205,12 +292,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
 
-# ── Fotoğraf işleyici ──────────────────────────────────────────────────────────
+# ── Fotograf isleyici ──────────────────────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
-    caption = update.message.caption or "Bu görseli detaylıca analiz et."
+    caption = update.message.caption or "Bu gorseli detaylica analiz et."
 
-    await update.message.reply_text("Görsel analiz ediliyor...")
+    await update.message.reply_text("Gorsel analiz ediliyor...")
 
     try:
         tf = await context.bot.get_file(photo.file_id)
@@ -219,7 +306,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         result_text = groq_vision(b64, caption)
 
-        memory.add_message("user", f"[Görsel gönderildi] {caption}")
+        memory.add_message("user", f"[Gorsel gonderildi] {caption}")
         memory.add_message("model", result_text[:500])
 
         for i in range(0, len(result_text), 4000):
@@ -236,16 +323,18 @@ def main():
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY environment variable eksik!")
 
-    # Render.com free tier için ping sunucusunu başlat
     port = int(os.environ.get("PORT", 8080))
     start_ping_server(port)
-    logger.info(f"Ping sunucusu port {port}'de başlatıldı.")
+    logger.info(f"Ping sunucusu port {port}'de baslatildi.")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("yardim", yardim))
     app.add_handler(CommandHandler("hafiza", hafiza))
+    app.add_handler(CommandHandler("profil", profil))
+    app.add_handler(CommandHandler("ogret", ogret))
+    app.add_handler(CommandHandler("ara", ara))
     app.add_handler(CommandHandler("hatirlat", hatirlat))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
