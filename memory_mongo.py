@@ -38,25 +38,31 @@ class MarteMemory:
         if uri and MONGO_AVAILABLE:
             try:
                 client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-                client.server_info()
+                client.server_info()  # Bağlantıyı test et
                 db = client["marte_memory"]
                 self.msg_col   = db["messages"]
                 self.doc_col   = db["documents"]
                 self.facts_col = db["user_facts"]
+                self.sys_col   = db["system_instructions"]
                 self.use_mongo = True
                 print("✅ MongoDB Atlas bağlantısı başarılı!")
             except Exception as e:
                 print(f"⚠️ MongoDB bağlanamadı, JSON fallback: {e}")
 
         if not self.use_mongo:
+            # JSON fallback (Render restart'ta sıfırlanır ama çalışır)
             self.data_dir = "memory_data"
             os.makedirs(self.data_dir, exist_ok=True)
             self._msgs_path  = os.path.join(self.data_dir, "messages.json")
             self._docs_path  = os.path.join(self.data_dir, "documents.json")
             self._facts_path = os.path.join(self.data_dir, "user_facts.json")
-            self.messages   = self._load(self._msgs_path)
-            self.documents  = self._load(self._docs_path)
-            self.user_facts = self._load(self._facts_path)
+            self._sys_path   = os.path.join(self.data_dir, "system_instructions.json")
+            self.messages        = self._load(self._msgs_path)
+            self.documents       = self._load(self._docs_path)
+            self.user_facts      = self._load(self._facts_path)
+            self.sys_instructions = self._load(self._sys_path)
+
+    # ── JSON Yardımcılar ──────────────────────────────────────────────────────
 
     def _load(self, path):
         if os.path.exists(path):
@@ -70,6 +76,8 @@ class MarteMemory:
     def _save_json(self, path, data):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ── Embedding ─────────────────────────────────────────────────────────────
 
     def _embed(self, text: str):
         try:
@@ -96,11 +104,21 @@ class MarteMemory:
     def _ts(self):
         return datetime.datetime.utcnow().isoformat()
 
+    # ── Mesaj Ekleme ──────────────────────────────────────────────────────────
+
     def add_message(self, role: str, text: str, user_id=None):
         embedding = self._embed(text[:2000])
-        entry = {"type": "message", "role": role, "text": text, "user_id": user_id, "timestamp": self._ts(), "embedding": embedding}
+        entry = {
+            "type": "message",
+            "role": role,
+            "text": text,
+            "user_id": user_id,
+            "timestamp": self._ts(),
+            "embedding": embedding,
+        }
         if self.use_mongo:
             self.msg_col.insert_one(entry)
+            # Son 1000 mesajı tut
             count = self.msg_col.count_documents({})
             if count > 1000:
                 oldest = self.msg_col.find().sort("timestamp", 1).limit(count - 1000)
@@ -112,26 +130,44 @@ class MarteMemory:
                 self.messages = self.messages[-1000:]
             self._save_json(self._msgs_path, self.messages)
 
+    # ── Belge Ekleme ──────────────────────────────────────────────────────────
+
     def add_document(self, filename: str, summary: str, mime_type: str = ""):
         embedding = self._embed(summary[:2000])
-        entry = {"type": "document", "filename": filename, "summary": summary, "mime_type": mime_type, "timestamp": self._ts(), "embedding": embedding}
+        entry = {
+            "type": "document",
+            "filename": filename,
+            "summary": summary,
+            "mime_type": mime_type,
+            "timestamp": self._ts(),
+            "embedding": embedding,
+        }
         if self.use_mongo:
             self.doc_col.insert_one(entry)
         else:
             self.documents.append(entry)
             self._save_json(self._docs_path, self.documents)
 
+    # ── Kullanıcı Profili ─────────────────────────────────────────────────────
+
     def add_user_fact(self, fact: str):
+        """Kullanıcı hakkında kalıcı bir bilgi ekle"""
         if self.use_mongo:
             existing = self.facts_col.find_one({"fact": {"$regex": f"^{fact}$", "$options": "i"}})
             if existing:
                 return
-            self.facts_col.insert_one({"fact": fact, "timestamp": self._ts(), "embedding": self._embed(fact)})
+            embedding = self._embed(fact)
+            self.facts_col.insert_one({
+                "fact": fact,
+                "timestamp": self._ts(),
+                "embedding": embedding,
+            })
         else:
             for existing in self.user_facts:
                 if existing.get("fact", "").lower().strip() == fact.lower().strip():
                     return
-            self.user_facts.append({"fact": fact, "timestamp": self._ts(), "embedding": self._embed(fact)})
+            embedding = self._embed(fact)
+            self.user_facts.append({"fact": fact, "timestamp": self._ts(), "embedding": embedding})
             self._save_json(self._facts_path, self.user_facts)
 
     def get_user_profile_text(self) -> str:
@@ -153,14 +189,32 @@ class MarteMemory:
     def auto_extract_facts(self, user_message: str, groq_client) -> list:
         if len(user_message) < 25:
             return []
+
         if self.use_mongo:
             existing_facts = [d["fact"] for d in self.facts_col.find().sort("timestamp", -1).limit(20)]
         else:
             existing_facts = [f["fact"] for f in self.user_facts[-20:]]
+
         existing_str = "\n".join(f"- {f}" for f in existing_facts) if existing_facts else "Henuz yok"
-        prompt = f"""Asagidaki kullanici mesajindan, kullanici hakkinda KALICI ve YENI bilgiler cikar.\nOrnek: meslek, projeler, isim, tercihler, uzmanlik alanlari, hobiler, onemli kisiler.\n\nZaten bilinen bilgiler (tekrarlama yapma):\n{existing_str}\n\nKullanici mesaji: {user_message[:400]}\n\nSADECE yeni ve kalici bilgileri yaz. Her bilgi bir satir. Yoksa sadece "YOK" yaz.\nGecici seyler (bugunun havasi, anlik sorular) ekleme."""
+
+        prompt = f"""Asagidaki kullanici mesajindan, kullanici hakkinda KALICI ve YENI bilgiler cikar.
+Ornek: meslek, projeler, isim, tercihler, uzmanlik alanlari, hobiler, onemli kisiler.
+
+Zaten bilinen bilgiler (tekrarlama yapma):
+{existing_str}
+
+Kullanici mesaji: {user_message[:400]}
+
+SADECE yeni ve kalici bilgileri yaz. Her bilgi bir satir. Yoksa sadece "YOK" yaz.
+Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
+
         try:
-            resp = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.1)
+            resp = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.1,
+            )
             result = resp.choices[0].message.content.strip()
             if result.upper().startswith("YOK") or not result:
                 return []
@@ -173,11 +227,18 @@ class MarteMemory:
         except Exception:
             return []
 
+    # ── Semantik Arama ────────────────────────────────────────────────────────
+
     def search(self, query: str, n: int = 5):
         qemb = self._embed_query(query)
         if qemb is None:
             return []
-        all_entries = list(self.msg_col.find()) + list(self.doc_col.find()) if self.use_mongo else self.messages + self.documents
+
+        if self.use_mongo:
+            all_entries = list(self.msg_col.find()) + list(self.doc_col.find())
+        else:
+            all_entries = self.messages + self.documents
+
         results = []
         for entry in all_entries:
             emb = entry.get("embedding")
@@ -185,21 +246,27 @@ class MarteMemory:
                 continue
             score = _cosine(qemb, emb)
             results.append((score, entry))
+
         results.sort(key=lambda x: x[0], reverse=True)
         return results[:n]
+
+    # ── Bağlam Oluşturma ──────────────────────────────────────────────────────
 
     def get_context(self, query: str, n: int = 5) -> str:
         results = self.search(query, n=n)
         if not results:
-            recent = list(self.msg_col.find().sort("timestamp", -1).limit(5)) if self.use_mongo else self.messages[-5:]
             if self.use_mongo:
+                recent = list(self.msg_col.find().sort("timestamp", -1).limit(5))
                 recent.reverse()
+            else:
+                recent = self.messages[-5:]
             if not recent:
                 return ""
             lines = ["Son konusmalar:"]
             for m in recent:
                 lines.append(f"[{m['role']}]: {m['text'][:300]}")
             return "\n".join(lines)
+
         lines = ["Ilgili gecmis bagiam:"]
         for score, entry in results:
             if score < 0.3:
@@ -208,11 +275,65 @@ class MarteMemory:
                 lines.append(f"[{entry['role']}]: {entry['text'][:300]}")
             else:
                 lines.append(f"[Belge - {entry['filename']}]: {entry['summary'][:300]}")
+
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
 
+    # ── Sistem Talimatları ────────────────────────────────────────────────────
+
+    def add_system_instruction(self, instruction: str) -> str:
+        """Kalıcı sistem talimatı ekle, ID döndür"""
+        import hashlib
+        inst_id = hashlib.md5(instruction.encode()).hexdigest()[:8]
+        entry = {"id": inst_id, "instruction": instruction, "timestamp": self._ts()}
+        if self.use_mongo:
+            if not self.sys_col.find_one({"id": inst_id}):
+                self.sys_col.insert_one(entry)
+        else:
+            if not any(s["id"] == inst_id for s in self.sys_instructions):
+                self.sys_instructions.append(entry)
+                self._save_json(self._sys_path, self.sys_instructions)
+        return inst_id
+
+    def get_system_instructions(self) -> list:
+        """Tüm sistem talimatlarını metin olarak döndür"""
+        if self.use_mongo:
+            return [d["instruction"] for d in self.sys_col.find().sort("timestamp", 1)]
+        return [s["instruction"] for s in self.sys_instructions]
+
+    def list_system_instructions(self) -> list:
+        """Tüm sistem talimatlarını (id dahil) döndür"""
+        if self.use_mongo:
+            return list(self.sys_col.find().sort("timestamp", 1))
+        return self.sys_instructions
+
+    def remove_system_instruction(self, inst_id: str) -> bool:
+        """Belirtilen ID'li talimatı sil"""
+        if self.use_mongo:
+            result = self.sys_col.delete_one({"id": inst_id})
+            return result.deleted_count > 0
+        else:
+            before = len(self.sys_instructions)
+            self.sys_instructions = [s for s in self.sys_instructions if s["id"] != inst_id]
+            if len(self.sys_instructions) < before:
+                self._save_json(self._sys_path, self.sys_instructions)
+                return True
+            return False
+
+    # ── İstatistikler ─────────────────────────────────────────────────────────
+
     def stats(self):
         if self.use_mongo:
-            return {"messages": self.msg_col.count_documents({}), "documents": self.doc_col.count_documents({}), "user_facts": self.facts_col.count_documents({}), "storage": "MongoDB Atlas ✅ (kalici)"}
-        return {"messages": len(self.messages), "documents": len(self.documents), "user_facts": len(self.user_facts), "storage": "JSON (gecici - restart'ta sifirlanir)"}
+            return {
+                "messages": self.msg_col.count_documents({}),
+                "documents": self.doc_col.count_documents({}),
+                "user_facts": self.facts_col.count_documents({}),
+                "storage": "MongoDB Atlas ✅ (kalici)"
+            }
+        return {
+            "messages": len(self.messages),
+            "documents": len(self.documents),
+            "user_facts": len(self.user_facts),
+            "storage": "JSON (gecici - restart'ta sifirlanir)"
+        }
