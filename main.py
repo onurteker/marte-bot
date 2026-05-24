@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Marte - Kisisel AI Asistan (Telegram Bot)
-Groq (Llama 3.3 70B) + Gemini Embeddings + Kalici Semantik Hafiza
+Groq (Llama 3.3 70B) + Gemini Embeddings + MongoDB Atlas Kalici Hafiza
 + Otomatik kullanici profili + Web arama + PDF destegi
 """
 
@@ -23,7 +23,7 @@ from telegram.ext import (
 from groq import Groq
 import google.generativeai as genai
 
-from memory import MarteMemory
+from memory_mongo import MarteMemory
 from web_search import web_search
 from render_keep_alive import start_ping_server
 
@@ -39,10 +39,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+MONGODB_URI    = os.environ.get("MONGODB_URI", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
-memory = MarteMemory(GEMINI_API_KEY)
+memory = MarteMemory(GEMINI_API_KEY, mongodb_uri=MONGODB_URI)
 
 CHAT_MODEL   = "llama-3.3-70b-versatile"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
@@ -128,6 +129,7 @@ async def hafiza(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = memory.stats()
     text = (
         f"Hafiza Istatistikleri:\n\n"
+        f"Depolama: {stats.get('storage', 'JSON')}\n"
         f"Mesajlar: {stats['messages']}\n"
         f"Belgeler: {stats['documents']}\n"
         f"Hakkinda bildigim bilgiler: {stats['user_facts']}"
@@ -136,13 +138,14 @@ async def hafiza(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not memory.user_facts:
+    facts_list = memory.user_facts_list
+    if not facts_list:
         await update.message.reply_text(
             "Henuz hakkinda kaydedilmis bilgi yok.\n"
             "/ogret komutuyla bana bilgi ogretebilirsin."
         )
         return
-    facts = [f["fact"] for f in memory.user_facts]
+    facts = [f["fact"] for f in facts_list]
     text = f"Hakkinda bildiklerim ({len(facts)} bilgi):\n\n"
     for i, fact in enumerate(facts, 1):
         text += f"{i}. {fact}\n"
@@ -195,13 +198,9 @@ async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for score, entry in results:
             ts = entry.get("timestamp", "")[:10]
             if entry["type"] == "message":
-                lines.append(
-                    f"[{ts}] [{entry['role']}] (uyum: {score:.2f})\n{entry['text'][:200]}"
-                )
+                lines.append(f"[{ts}] [{entry['role']}] (uyum: {score:.2f})\n{entry['text'][:200]}")
             else:
-                lines.append(
-                    f"[{ts}] [Dosya: {entry['filename']}] (uyum: {score:.2f})\n{entry['summary'][:200]}"
-                )
+                lines.append(f"[{ts}] [Dosya: {entry['filename']}] (uyum: {score:.2f})\n{entry['summary'][:200]}")
         await update.message.reply_text("\n\n".join(lines))
     except Exception as e:
         await update.message.reply_text(f"Arama hatasi: {str(e)[:200]}")
@@ -211,22 +210,16 @@ async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.effective_user
-
     ctx = memory.get_context(text)
     system_prompt = build_system_prompt()
-
     if ctx:
         prompt = f"{ctx}\n\nSu anki kullanici mesaji: {text}"
     else:
         prompt = text
-
     try:
         response_text = groq_chat(prompt, system=system_prompt)
-
         memory.add_message("user", text, user_id=user.id)
         memory.add_message("model", response_text)
-
-        # Otomatik kullanici profili cikarimi
         try:
             new_facts = memory.auto_extract_facts(text, groq_client)
             for fact in new_facts:
@@ -234,10 +227,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Yeni kullanici bilgisi: {fact}")
         except Exception:
             pass
-
         for i in range(0, len(response_text), 4000):
             await update.message.reply_text(response_text[i : i + 4000])
-
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
@@ -248,17 +239,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fname = doc.file_name or "dosya"
     mime = doc.mime_type or "application/octet-stream"
     caption = update.message.caption or "Bu dosyayi detaylica analiz et ve ozetle."
-
     await update.message.reply_text(f"Analiz ediyorum: {fname}...")
-
     try:
         tf = await context.bot.get_file(doc.file_id)
         fb = await tf.download_as_bytearray()
-
         if mime in ("text/plain",) or fname.endswith(".txt"):
             file_text = fb.decode("utf-8", errors="ignore")[:8000]
             prompt = f"{caption}\n\nDosya icerigi:\n{file_text}"
-
         elif mime == "application/pdf" or fname.lower().endswith(".pdf"):
             try:
                 import io
@@ -271,23 +258,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if file_text.strip():
                     prompt = f"{caption}\n\nPDF icerigi ({len(reader.pages)} sayfa):\n{file_text}"
                 else:
-                    prompt = f"{caption}\n\nPDF: {fname} - Metin cikarildi ancak icerik bos (taranmis gorsel PDF olabilir)"
+                    prompt = f"{caption}\n\nPDF: {fname} - Metin cikarildi ancak icerik bos"
             except Exception as pe:
-                prompt = f"{caption}\n\nPDF: {fname} ({len(fb)} bytes) - Okuma hatasi: {str(pe)[:100]}"
-
+                prompt = f"{caption}\n\nPDF: {fname} - Okuma hatasi: {str(pe)[:100]}"
         else:
             file_text = f"[{fname} - {len(fb)} bytes, {mime}]"
             prompt = f"{caption}\n\nDosya: {file_text}\n(Bu dosya turu icin metin cikarimi desteklenmiyor)"
-
         result_text = groq_chat(prompt, system=build_system_prompt())
-
         memory.add_document(fname, result_text[:1500], mime_type=mime)
         memory.add_message("user", f"[Dosya yuklendi: {fname}] {caption}")
         memory.add_message("model", result_text[:500])
-
         for i in range(0, len(result_text), 4000):
             await update.message.reply_text(result_text[i : i + 4000])
-
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
@@ -296,22 +278,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     caption = update.message.caption or "Bu gorseli detaylica analiz et."
-
     await update.message.reply_text("Gorsel analiz ediliyor...")
-
     try:
         tf = await context.bot.get_file(photo.file_id)
         fb = await tf.download_as_bytearray()
         b64 = base64.b64encode(bytes(fb)).decode()
-
         result_text = groq_vision(b64, caption)
-
         memory.add_message("user", f"[Gorsel gonderildi] {caption}")
         memory.add_message("model", result_text[:500])
-
         for i in range(0, len(result_text), 4000):
             await update.message.reply_text(result_text[i : i + 4000])
-
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
@@ -322,13 +298,10 @@ def main():
         raise ValueError("TELEGRAM_TOKEN environment variable eksik!")
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY environment variable eksik!")
-
     port = int(os.environ.get("PORT", 8080))
     start_ping_server(port)
     logger.info(f"Ping sunucusu port {port}'de baslatildi.")
-
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("yardim", yardim))
     app.add_handler(CommandHandler("hafiza", hafiza))
@@ -336,11 +309,9 @@ def main():
     app.add_handler(CommandHandler("ogret", ogret))
     app.add_handler(CommandHandler("ara", ara))
     app.add_handler(CommandHandler("hatirlat", hatirlat))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
     logger.info("Marte baslatiliyor...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
