@@ -1,6 +1,6 @@
 python-telegram-bot>=21.0
 groq
-google-generativeai
+google-genai
 numpy
 duckduckgo-search
 PyPDF2
