@@ -288,6 +288,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+        # Her 10 mesajda bir otomatik davranis ogrenimi
+        try:
+            msg_count = memory.stats()["messages"]
+            if msg_count % 10 == 0:
+                new_behaviors = memory.auto_update_behavior(groq_client)
+                for behavior in new_behaviors:
+                    memory.add_system_instruction(behavior)
+                    logger.info(f"Otomatik davranis talimati eklendi: {behavior}")
+        except Exception:
+            pass
+
         for i in range(0, len(response_text), 4000):
             await update.message.reply_text(response_text[i : i + 4000])
 
