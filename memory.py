@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-MarteMemory - Kalici Semantik Hafiza Sistemi
+MarteMemory - Kalıcı Semantik Hafıza Sistemi
 Gemini text-embedding-004 ile semantik arama
++ Kullanıcı profili otomatik çıkarımı
 """
 
 import os
@@ -24,12 +25,16 @@ class MarteMemory:
         genai.configure(api_key=gemini_api_key)
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+
         self._msgs_path  = os.path.join(data_dir, "messages.json")
         self._docs_path  = os.path.join(data_dir, "documents.json")
         self._facts_path = os.path.join(data_dir, "user_facts.json")
+
         self.messages   = self._load(self._msgs_path)
         self.documents  = self._load(self._docs_path)
         self.user_facts = self._load(self._facts_path)
+
+    # ── Yardımcılar ──────────────────────────────────────────────────────────
 
     def _load(self, path):
         if os.path.exists(path):
@@ -69,36 +74,125 @@ class MarteMemory:
     def _ts(self):
         return datetime.datetime.utcnow().isoformat()
 
+    # ── Mesaj Ekleme ──────────────────────────────────────────────────────────
+
     def add_message(self, role: str, text: str, user_id=None):
         embedding = self._embed(text[:2000])
-        entry = {"type": "message", "role": role, "text": text, "user_id": user_id,
-                 "timestamp": self._ts(), "embedding": embedding}
+        entry = {
+            "type": "message",
+            "role": role,
+            "text": text,
+            "user_id": user_id,
+            "timestamp": self._ts(),
+            "embedding": embedding,
+        }
         self.messages.append(entry)
-        if len(self.messages) > 500:
-            self.messages = self.messages[-500:]
+        # Son 1000 mesajı tut
+        if len(self.messages) > 1000:
+            self.messages = self.messages[-1000:]
         self._save(self._msgs_path, self.messages)
+
+    # ── Belge Ekleme ──────────────────────────────────────────────────────────
 
     def add_document(self, filename: str, summary: str, mime_type: str = ""):
         embedding = self._embed(summary[:2000])
-        entry = {"type": "document", "filename": filename, "summary": summary,
-                 "mime_type": mime_type, "timestamp": self._ts(), "embedding": embedding}
+        entry = {
+            "type": "document",
+            "filename": filename,
+            "summary": summary,
+            "mime_type": mime_type,
+            "timestamp": self._ts(),
+            "embedding": embedding,
+        }
         self.documents.append(entry)
         self._save(self._docs_path, self.documents)
+
+    # ── Kullanıcı Profili ─────────────────────────────────────────────────────
+
+    def add_user_fact(self, fact: str):
+        """Kullanıcı hakkında kalıcı bir bilgi ekle"""
+        for existing in self.user_facts:
+            if existing.get("fact", "").lower().strip() == fact.lower().strip():
+                return
+        embedding = self._embed(fact)
+        entry = {
+            "fact": fact,
+            "timestamp": self._ts(),
+            "embedding": embedding,
+        }
+        self.user_facts.append(entry)
+        self._save(self._facts_path, self.user_facts)
+
+    def get_user_profile_text(self) -> str:
+        """Sistem promptu icin kullanici profilini duzenli metne donustur"""
+        if not self.user_facts:
+            return ""
+        facts = [f["fact"] for f in self.user_facts[-100:]]
+        return "Kullanici hakkinda bilinen bilgiler:\n" + "\n".join(f"- {f}" for f in facts)
+
+    def auto_extract_facts(self, user_message: str, groq_client) -> list:
+        """
+        Kullanici mesajindan kalici bilgileri otomatik cikar.
+        """
+        if len(user_message) < 25:
+            return []
+
+        existing_facts = [f["fact"] for f in self.user_facts[-20:]]
+        existing_str = "\n".join(f"- {f}" for f in existing_facts) if existing_facts else "Henuz yok"
+
+        prompt = f"""Asagidaki kullanici mesajindan, kullanici hakkinda KALICI ve YENI bilgiler cikar.
+Ornek: meslek, projeler, isim, tercihler, uzmanlik alanlari, hobiler, onemli kisiler.
+
+Zaten bilinen bilgiler (tekrarlama yapma):
+{existing_str}
+
+Kullanici mesaji: {user_message[:400]}
+
+SADECE yeni ve kalici bilgileri yaz. Her bilgi bir satir. Yoksa sadece "YOK" yaz.
+Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
+
+        try:
+            resp = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.1,
+            )
+            result = resp.choices[0].message.content.strip()
+            if result.upper().startswith("YOK") or not result:
+                return []
+            facts = []
+            for line in result.split("\n"):
+                line = line.strip().lstrip("-*•").strip()
+                if line and len(line) > 5 and "YOK" not in line.upper():
+                    facts.append(line)
+            return facts
+        except Exception:
+            return []
+
+    # ── Semantik Arama ────────────────────────────────────────────────────────
 
     def search(self, query: str, n: int = 5):
         qemb = self._embed_query(query)
         if qemb is None:
             return []
+
         results = []
-        for entry in self.messages + self.documents:
+        all_entries = self.messages + self.documents
+
+        for entry in all_entries:
             emb = entry.get("embedding")
             if emb is None:
                 continue
-            results.append((_cosine(qemb, emb), entry))
+            score = _cosine(qemb, emb)
+            results.append((score, entry))
+
         results.sort(key=lambda x: x[0], reverse=True)
         return results[:n]
 
-    def get_context(self, query: str, n: int = 3) -> str:
+    # ── Bagiam Olusturma ─────────────────────────────────────────────────────
+
+    def get_context(self, query: str, n: int = 5) -> str:
         results = self.search(query, n=n)
         if not results:
             recent = self.messages[-5:]
@@ -108,6 +202,7 @@ class MarteMemory:
             for m in recent:
                 lines.append(f"[{m['role']}]: {m['text'][:300]}")
             return "\n".join(lines)
+
         lines = ["Ilgili gecmis bagiam:"]
         for score, entry in results:
             if score < 0.3:
@@ -116,10 +211,16 @@ class MarteMemory:
                 lines.append(f"[{entry['role']}]: {entry['text'][:300]}")
             else:
                 lines.append(f"[Belge - {entry['filename']}]: {entry['summary'][:300]}")
+
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
 
+    # ── Istatistikler ─────────────────────────────────────────────────────────
+
     def stats(self):
-        return {"messages": len(self.messages), "documents": len(self.documents),
-                "user_facts": len(self.user_facts)}
+        return {
+            "messages": len(self.messages),
+            "documents": len(self.documents),
+            "user_facts": len(self.user_facts),
+        }
