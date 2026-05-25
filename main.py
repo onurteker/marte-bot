@@ -21,7 +21,6 @@ from telegram.ext import (
     filters,
 )
 from groq import Groq
-import google.generativeai as genai
 
 from memory_mongo import MarteMemory
 from web_search import web_search
@@ -41,13 +40,11 @@ GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
 MONGODB_URI = os.environ.get("MONGODB_URI", "")
 memory = MarteMemory(GEMINI_API_KEY, mongodb_uri=MONGODB_URI)
 
 CHAT_MODEL   = "llama-3.3-70b-versatile"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
-
 
 def build_system_prompt() -> str:
     base = (
@@ -65,7 +62,6 @@ def build_system_prompt() -> str:
             base += f"- {inst}\n"
     return base
 
-
 def groq_chat(prompt: str, system: str = None) -> str:
     messages = []
     if system:
@@ -77,7 +73,6 @@ def groq_chat(prompt: str, system: str = None) -> str:
         max_tokens=2048,
     )
     return resp.choices[0].message.content
-
 
 def groq_vision(image_b64: str, prompt: str) -> str:
     resp = groq_client.chat.completions.create(
@@ -92,7 +87,6 @@ def groq_vision(image_b64: str, prompt: str) -> str:
         max_tokens=1024,
     )
     return resp.choices[0].message.content
-
 
 # ── Komutlar ──────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,7 +105,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sistem_sil <id> - Talimat sil"
     )
     await update.message.reply_text(text)
-
 
 async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -133,7 +126,6 @@ async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-
 async def hafiza(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = memory.stats()
     text = (
@@ -144,7 +136,6 @@ async def hafiza(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Hakkinda bildigim bilgiler: {stats['user_facts']}"
     )
     await update.message.reply_text(text)
-
 
 async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     facts_list = memory.user_facts_list
@@ -160,7 +151,6 @@ async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {fact}\n"
     await update.message.reply_text(text[:4000])
 
-
 async def ogret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
@@ -171,7 +161,6 @@ async def ogret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fact = " ".join(context.args)
     memory.add_user_fact(fact)
     await update.message.reply_text(f"Kaydettim! \"{fact}\" - Artik bunu hep bilecegim.")
-
 
 async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -190,7 +179,6 @@ async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(summary[:4000])
     except Exception as e:
         await update.message.reply_text(f"Arama hatasi: {str(e)[:200]}")
-
 
 async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -217,7 +205,6 @@ async def hatirlat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n\n".join(lines))
     except Exception as e:
         await update.message.reply_text(f"Arama hatasi: {str(e)[:200]}")
-
 
 async def sistem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -247,7 +234,6 @@ async def sistem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Bu talimat bundan sonraki tum konusmalarda gecerli olacak."
     )
 
-
 async def sistem_sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Kullanim: /sistem_sil <id>\nMevcut talimatlar icin: /sistem")
@@ -258,7 +244,6 @@ async def sistem_sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Talimat silindi: {inst_id}")
     else:
         await update.message.reply_text(f"Talimat bulunamadi: {inst_id}\nMevcut talimatlar icin: /sistem")
-
 
 # ── Mesaj isleyici ─────────────────────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,7 +289,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
-
 
 # ── Dokuman isleyici ───────────────────────────────────────────────────────────
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,7 +339,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
-
 # ── Fotograf isleyici ──────────────────────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
@@ -378,7 +361,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
-
 
 # ── Ana fonksiyon ──────────────────────────────────────────────────────────────
 def main():
@@ -409,7 +391,6 @@ def main():
 
     logger.info("Marte baslatiliyor...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
