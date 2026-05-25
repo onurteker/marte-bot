@@ -4,4 +4,5 @@ google-genai
 numpy
 duckduckgo-search
 PyPDF2
+pymupdf
 pymongo[srv]
