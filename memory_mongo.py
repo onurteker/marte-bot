@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-MarteMemory - Kalıcı Semantik Hafıza Sistemi
-MongoDB Atlas (kalıcı) + Gemini text-embedding-004 ile semantik arama
-+ Kullanıcı profili otomatik çıkarımı
+MarteMemory - KalÄ±cÄ± Semantik HafÄ±za Sistemi
+MongoDB Atlas (kalÄ±cÄ±) + Gemini text-embedding-004 ile semantik arama
++ KullanÄ±cÄ± profili otomatik Ã§Ä±karÄ±mÄ±
 """
 
 import os
 import datetime
 import numpy as np
-import google.generativeai as genai
+from google import genai
 
 try:
     from pymongo import MongoClient
@@ -29,28 +29,28 @@ def _cosine(a, b):
 
 class MarteMemory:
     def __init__(self, gemini_api_key: str, mongodb_uri: str = None):
-        genai.configure(api_key=gemini_api_key)
+        self._genai = genai.Client(api_key=gemini_api_key)
 
-        # MongoDB bağlantısı
+        # MongoDB baÄlantÄ±sÄ±
         uri = mongodb_uri or os.environ.get("MONGODB_URI", "")
         self.use_mongo = False
 
         if uri and MONGO_AVAILABLE:
             try:
                 client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-                client.server_info()  # Bağlantıyı test et
+                client.server_info()  # BaÄlantÄ±yÄ± test et
                 db = client["marte_memory"]
                 self.msg_col   = db["messages"]
                 self.doc_col   = db["documents"]
                 self.facts_col = db["user_facts"]
                 self.sys_col   = db["system_instructions"]
                 self.use_mongo = True
-                print("✅ MongoDB Atlas bağlantısı başarılı!")
+                print("â MongoDB Atlas baÄlantÄ±sÄ± baÅarÄ±lÄ±!")
             except Exception as e:
-                print(f"⚠️ MongoDB bağlanamadı, JSON fallback: {e}")
+                print(f"â ï¸ MongoDB baÄlanamadÄ±, JSON fallback: {e}")
 
         if not self.use_mongo:
-            # JSON fallback (Render restart'ta sıfırlanır ama çalışır)
+            # JSON fallback (Render restart'ta sÄ±fÄ±rlanÄ±r ama Ã§alÄ±ÅÄ±r)
             self.data_dir = "memory_data"
             os.makedirs(self.data_dir, exist_ok=True)
             self._msgs_path  = os.path.join(self.data_dir, "messages.json")
@@ -62,7 +62,7 @@ class MarteMemory:
             self.user_facts      = self._load(self._facts_path)
             self.sys_instructions = self._load(self._sys_path)
 
-    # ── JSON Yardımcılar ──────────────────────────────────────────────────────
+    # ââ JSON YardÄ±mcÄ±lar ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def _load(self, path):
         if os.path.exists(path):
@@ -77,34 +77,34 @@ class MarteMemory:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # ── Embedding ─────────────────────────────────────────────────────────────
+    # ââ Embedding âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def _embed(self, text: str):
         try:
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                content=text,
-                task_type="RETRIEVAL_DOCUMENT",
+            result = self._genai.models.embed_content(
+                model="text-embedding-004",
+                contents=text,
+                config={"task_type": "RETRIEVAL_DOCUMENT"},
             )
-            return result["embedding"]
+            return list(result.embeddings[0].values)
         except Exception:
             return None
 
     def _embed_query(self, text: str):
         try:
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                content=text,
-                task_type="RETRIEVAL_QUERY",
+            result = self._genai.models.embed_content(
+                model="text-embedding-004",
+                contents=text,
+                config={"task_type": "RETRIEVAL_QUERY"},
             )
-            return result["embedding"]
+            return list(result.embeddings[0].values)
         except Exception:
             return None
 
     def _ts(self):
         return datetime.datetime.utcnow().isoformat()
 
-    # ── Mesaj Ekleme ──────────────────────────────────────────────────────────
+    # ââ Mesaj Ekleme ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def add_message(self, role: str, text: str, user_id=None):
         embedding = self._embed(text[:2000])
@@ -118,7 +118,7 @@ class MarteMemory:
         }
         if self.use_mongo:
             self.msg_col.insert_one(entry)
-            # Son 1000 mesajı tut
+            # Son 1000 mesajÄ± tut
             count = self.msg_col.count_documents({})
             if count > 1000:
                 oldest = self.msg_col.find().sort("timestamp", 1).limit(count - 1000)
@@ -130,7 +130,7 @@ class MarteMemory:
                 self.messages = self.messages[-1000:]
             self._save_json(self._msgs_path, self.messages)
 
-    # ── Belge Ekleme ──────────────────────────────────────────────────────────
+    # ââ Belge Ekleme ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def add_document(self, filename: str, summary: str, mime_type: str = ""):
         embedding = self._embed(summary[:2000])
@@ -148,10 +148,10 @@ class MarteMemory:
             self.documents.append(entry)
             self._save_json(self._docs_path, self.documents)
 
-    # ── Kullanıcı Profili ─────────────────────────────────────────────────────
+    # ââ KullanÄ±cÄ± Profili âââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def add_user_fact(self, fact: str):
-        """Kullanıcı hakkında kalıcı bir bilgi ekle"""
+        """KullanÄ±cÄ± hakkÄ±nda kalÄ±cÄ± bir bilgi ekle"""
         if self.use_mongo:
             existing = self.facts_col.find_one({"fact": {"$regex": f"^{fact}$", "$options": "i"}})
             if existing:
@@ -220,14 +220,14 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
                 return []
             facts = []
             for line in result.split("\n"):
-                line = line.strip().lstrip("-*•").strip()
+                line = line.strip().lstrip("-*â¢").strip()
                 if line and len(line) > 5 and "YOK" not in line.upper():
                     facts.append(line)
             return facts
         except Exception:
             return []
 
-    # ── Semantik Arama ────────────────────────────────────────────────────────
+    # ââ Semantik Arama ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def search(self, query: str, n: int = 5):
         qemb = self._embed_query(query)
@@ -250,7 +250,7 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
         results.sort(key=lambda x: x[0], reverse=True)
         return results[:n]
 
-    # ── Bağlam Oluşturma ──────────────────────────────────────────────────────
+    # ââ BaÄlam OluÅturma ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def get_context(self, query: str, n: int = 5) -> str:
         results = self.search(query, n=n)
@@ -280,10 +280,10 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
             return ""
         return "\n".join(lines)
 
-    # ── Sistem Talimatları ────────────────────────────────────────────────────
+    # ââ Sistem TalimatlarÄ± ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def add_system_instruction(self, instruction: str) -> str:
-        """Kalıcı sistem talimatı ekle, ID döndür"""
+        """KalÄ±cÄ± sistem talimatÄ± ekle, ID dÃ¶ndÃ¼r"""
         import hashlib
         inst_id = hashlib.md5(instruction.encode()).hexdigest()[:8]
         entry = {"id": inst_id, "instruction": instruction, "timestamp": self._ts()}
@@ -293,23 +293,23 @@ Gecici seyler (bugunun havasi, anlik sorular) ekleme."""
         else:
             if not any(s["id"] == inst_id for s in self.sys_instructions):
                 self.sys_instructions.append(entry)
-                self._save_json(self._sys_path, self.sys_instruct)ons)
+                self._save_json(self._sys_path, self.sys_instructions)
         return inst_id
 
     def get_system_instructions(self) -> list:
-        """Tüm sistem talimatlarını metin olarak döndür"""
+        """TÃ¼m sistem talimatlarÄ±nÄ± metin olarak dÃ¶ndÃ¼r"""
         if self.use_mongo:
             return [d["instruction"] for d in self.sys_col.find().sort("timestamp", 1)]
         return [s["instruction"] for s in self.sys_instructions]
 
     def list_system_instructions(self) -> list:
-        """Tüm sistem talimatlarını (id dahil) döndür"""
+        """TÃ¼m sistem talimatlarÄ±nÄ± (id dahil) dÃ¶ndÃ¼r"""
         if self.use_mongo:
             return list(self.sys_col.find().sort("timestamp", 1))
         return self.sys_instructions
 
     def remove_system_instruction(self, inst_id: str) -> bool:
-        """Belirtilen ID'li talimatı sil"""
+        """Belirtilen ID'li talimatÄ± sil"""
         if self.use_mongo:
             result = self.sys_col.delete_one({"id": inst_id})
             return result.deleted_count > 0
@@ -371,14 +371,14 @@ Yeni bir sey yoksa sadece "YOK" yaz."""
                 return []
             new_instructions = []
             for line in result.split("\n"):
-                line = line.strip().lstrip("-*•0123456789.").strip()
+                line = line.strip().lstrip("-*â¢0123456789.").strip()
                 if line and len(line) > 10 and "YOK" not in line.upper():
                     new_instructions.append(line)
             return new_instructions
         except Exception:
             return []
 
-    # ── İstatistikler ─────────────────────────────────────────────────────────
+    # ââ Ä°statistikler âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
     def stats(self):
         if self.use_mongo:
@@ -386,7 +386,7 @@ Yeni bir sey yoksa sadece "YOK" yaz."""
                 "messages": self.msg_col.count_documents({}),
                 "documents": self.doc_col.count_documents({}),
                 "user_facts": self.facts_col.count_documents({}),
-                "storage": "MongoDB Atlas ✅ (kalici)"
+                "storage": "MongoDB Atlas â (kalici)"
             }
         return {
             "messages": len(self.messages),
