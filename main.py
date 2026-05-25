@@ -59,24 +59,6 @@ TOOLS = [
                 "required": ["query"]
             }
         }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_memory",
-            "description": (
-                "Gecmis konusmalarda ve yuklenen belgelerde ara. "
-                "Kullanicinin daha once soylediklerini, paylastigini veya "
-                "yuklenen dosyalari bulmak icin kullan."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Arama sorgusu"}
-                },
-                "required": ["query"]
-            }
-        }
     }
 ]
 
