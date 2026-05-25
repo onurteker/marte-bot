@@ -477,7 +477,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Hata: {str(e)[:200]}")
 
 # ── Dokuman Isleyici ─────────────────────────────────────────────────────────
-Jasync def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     fname = doc.file_name or "dosya"
     mime = doc.mime_type or "application/octet-stream"
