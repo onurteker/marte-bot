@@ -136,64 +136,77 @@ def groq_chat(prompt: str, system: str = None) -> str:
     )
     return resp.choices[0].message.content
 
-# ── Groq Chat with Tools (otomatik arac secimi) ───────────────────────────────
+# ── Groq Chat with Tools (otomatik arac secimi) ───────────────────────────────────
 def groq_chat_with_tools(prompt: str, system: str = None) -> str:
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    try:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
-    for _ in range(2):  # maksimum 2 tur arac cagrisi
-        resp = groq_client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            max_tokens=2048,
-        )
-        msg = resp.choices[0].message
-
-        if not msg.tool_calls:
-            return msg.content or ""
-
-        # Asistan mesajini tool_calls ile ekle
-        messages.append({
-            "role": "assistant",
-            "content": msg.content or "",
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                }
-                for tc in msg.tool_calls
-            ]
-        })
-
-        # Araclari calistir ve sonuclari ekle
-        for tc in msg.tool_calls:
+        for _ in range(2):  # maksimum 2 tur arac cagrisi
             try:
-                args = json.loads(tc.function.arguments)
-            except Exception:
-                args = {}
-            result = execute_tool(tc.function.name, args)
-            logger.info(f"Tool cagrildi: {tc.function.name} -> {str(result)[:80]}")
+                resp = groq_client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    max_tokens=2048,
+                )
+            except Exception as api_err:
+                logger.warning(f"Tool use API hatasi, aracsiz fallback: {api_err}")
+                return groq_chat(prompt, system=system)
+
+            msg = resp.choices[0].message
+
+            if not msg.tool_calls:
+                return msg.content or ""
+
+            # Asistan mesajini tool_calls ile ekle
             messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result[:3000]
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in msg.tool_calls
+                ]
             })
 
-    # Maksimum tur asildi: araclar olmadan son cevap
-    resp = groq_client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=messages,
-        max_tokens=2048,
-    )
-    return resp.choices[0].message.content or ""
+            # Araclari calistir ve sonuclari ekle
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception:
+                    args = {}
+                result = execute_tool(tc.function.name, args)
+                logger.info(f"Tool cagrildi: {tc.function.name} -> {str(result)[:80]}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result[:3000]
+                })
+
+        # Maksimum tur asildi: araclar olmadan son cevap
+        try:
+            resp = groq_client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=messages,
+                max_tokens=2048,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception:
+            return groq_chat(prompt, system=system)
+
+    except Exception as e:
+        logger.error(f"groq_chat_with_tools genel hata: {e}")
+        return groq_chat(prompt, system=system)
 
 # ── Groq Vision ──────────────────────────────────────────────────────────────
 def groq_vision(image_b64: str, prompt: str) -> str:
